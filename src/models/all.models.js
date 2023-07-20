@@ -119,6 +119,8 @@ export const Like = db.sequelize.define("likes", {
 },
 )
 
+
+// @define relations
 User.hasMany(Like);
 User.hasMany(Article);
 
