@@ -26,6 +26,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "mysql2": "^3.5.1",
     "nodemailer": "^6.9.4",
+    "otp-generator": "^4.0.1",
     "sequelize": "^6.32.1",
     "yup": "^1.2.0",
     "yup-password": "^0.2.2"

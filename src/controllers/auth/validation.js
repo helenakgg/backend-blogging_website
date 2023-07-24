@@ -41,11 +41,20 @@ export const changePasswordSchema = Yup.object({
     .min(5,'Username minimum 5 characters'),
   });
   
+  export const changeEmailSchema = Yup.object({
+    currentEmail : Yup.string().email("Invalid email").required("Email is required"),
+    newEmail : Yup.string().email("Invalid email").required("New Email is required")
+  })
+
   export const changePhoneSchema = Yup.object().shape({
-    phone: Yup.string()
+    currentPhone: Yup.string()
       .matches(/[0-9]/,'phone must be a number')
       .matches(/0[0-9]/,'phone must be a number and start with 0')
       .min(10,'phone must contain 10 or more digits'),
+    newPhone: Yup.string()
+      .matches(/[0-9]/,'phone must be a number')
+      .matches(/0[0-9]/,'phone must be a number and start with 0')
+      .min(10,'phone must contain 10 or more digits') 
   });
   
   export const resetPasswordSchema = Yup.object().shape({

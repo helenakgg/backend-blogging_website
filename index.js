@@ -17,7 +17,7 @@ app.use(cors({ exposedHeaders : "Authorization" }))
 app.use(middleware.requestLogger)
 
 // @expose public folder
-// app.use("/public", express.static("public"))
+app.use("/public", express.static("public"))
 
 // @root route
 app.get("/", (req, res) => {
@@ -26,9 +26,11 @@ app.get("/", (req, res) => {
 
 // @use router
 import AuthRouters from "./src/controllers/auth/routers.js"
+import BlogRouters from "./src/controllers/blog/routers.js";
+
 
 app.use("/api/auth", AuthRouters)
-
+app.use("/api/blog", BlogRouters);
 
 // @global error handler
 app.use(middleware.errorHandler)

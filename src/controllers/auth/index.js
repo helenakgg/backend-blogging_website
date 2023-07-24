@@ -8,9 +8,11 @@ import cloudinary from "cloudinary"
 import * as config from "../../config/index.js"
 import * as helpers from "../../helpers/index.js"
 import * as error from "../../middlewares/error.handler.js"
-import { User } from "../../models/all.models.js"
-import db from "../../models/index.js"
+import { User } from "../../models/user.js"
+import db from "../../database/index.js"
 import * as validation from "./validation.js"
+
+const cache = new Map()
 
 // @register process
 export const register = async (req, res, next) => {
@@ -29,28 +31,26 @@ export const register = async (req, res, next) => {
         // @create user -> encypt password
         const hashedPassword = helpers.hashPassword(password);
         
+        // @generate otp token
+        const otpToken = helpers.generateOtp();
         
         // @archive user data
         const user = await User?.create({
             username,
             password : hashedPassword,
             email,
-            phone
+            phone,
+            otp : otpToken,
+            expiredOtp : moment().add(1, "days").format("YYYY-MM-DD HH:mm:ss")
         });
-
 
         // @delete unused data from response
         delete user?.dataValues?.password;
+        delete user?.dataValues?.otp;
+        delete user?.dataValues?.expiredOtp;
 
         // @generate access token
-        const accessToken = helpers.createToken({ id: user?.dataValues?.id, username : user?.dataValues?.username });
-
-        await User?.update({ 
-                verify_token : accessToken,
-                expired_token : moment().add(1, "days").format("YYYY-MM-DD HH:mm:ss")
-            }, 
-            { where : { id : user?.dataValues?.id } }
-        )    
+        const accessToken = helpers.createToken({ uuid: user?.dataValues?.uuid, username : user?.dataValues?.username });
         
         // @send response
         res.header("Authorization", `Bearer ${accessToken}`)
@@ -61,15 +61,15 @@ export const register = async (req, res, next) => {
             });
 
         // @generate email message
-        // const template = fs.readFileSync(path.join(process.cwd(), "templates", "index.html"), "utf8");
-        // const message  = handlebars.compile(template)({ link : `http://localhost:5000/api/auth/verify/${accessToken}` })
+        const template = fs.readFileSync(path.join(process.cwd(), "templates", "otp.html"), "utf8");
+        const message  = handlebars.compile(template)({ otpToken, link : config.REDIRECT_URL + `/auth/verify/reg-${user?.dataValues?.uuid}` })
 
         //@send verification email
         const mailOptions = {
             from: config.GMAIL,
             to: email,
             subject: "Verification",
-            html: `<h1> Click <a href="http://localhost:5000/api/auth/verify/${accessToken}">here</a> to verify your account</h1>`
+            html: message
         }
         
         helpers.transporter.sendMail(mailOptions, (error, info) => {
@@ -110,36 +110,49 @@ export const login = async (req, res, next) => {
          const isPasswordCorrect = helpers.comparePassword(password, userExists?.dataValues?.password);
          if (!isPasswordCorrect) throw ({ status : 400, message : error.INVALID_CREDENTIALS });
 
+         // @check token in chache
+        const cachedToken = cache.get(userExists?.dataValues?.uuid)
+        const isValid = cachedToken && helpers.verifyToken(cachedToken)
+        let accessToken = null
+        if (cachedToken && isValid) {
+            accessToken = cachedToken
+        } else {
+            // @generate access token
+            const accessToken = helpers.createToken({ uuid: userExists?.dataValues?.uuid, username : userExists?.dataValues?.username });
+        }
+            
          // @delete password from response
         delete userExists?.dataValues?.password;
-
-        // @generate access token
-        const accessToken = helpers.createToken({ id: userExists?.dataValues?.id, username : userExists?.dataValues?.username });
-
+        delete userExists?.dataValues?.otp;
+        delete userExists?.dataValues?.expiredOtp;
+         
         // @send response
         res.header("Authorization", `Bearer ${accessToken}`)
             .status(200)
-            .json({
-                user : userExists
-            });
+            .json({ user : userExists });
 
     } catch (error) {
-        res.status(500).json({
-            message: "Something went wrong",
-            error: error?.message || error
-        });
+        // @check if error from validation
+        if (error instanceof ValidationError) {
+            return next({ status : 400, message : error?.errors?.[0] })
+        }
+        next(error)
     }
 }
 
 // @keeplogin
 export const keepLogin = async (req, res, next) => {
     try {
+        // @get user id from token
+        const { uuid } = req.user;
         
         // @get user data
-        const user = await User?.findOne({ where : { id : req.user.id } });
+        const user = await User?.findOne({ where : { uuid } });
 
         // @delete password from response
         delete user?.dataValues?.password;
+        delete user?.dataValues?.otp;
+        delete user?.dataValues?.expiredOtp;
 
         // @return response
         res.status(200).json({ user })
@@ -150,35 +163,34 @@ export const keepLogin = async (req, res, next) => {
 
 // @verify account
 export const verify = async (req, res, next) => {
-    const transaction = await db.sequelize.transaction();
+    // const transaction = await db.sequelize.transaction();
     try {
         // @get token from body
-        const { token } = req.params;    
-        
-        // @verify token 
-        const decodedToken = helpers.verifyToken(token);
+        const { uuid, token } = req.body;
 
+        // @check context
+        const context = uuid.split("-")[0];
+        const userId = uuid.split("-")?.slice(1)?.join("-");
 
         // @check if user exists
-        const userExists = await User?.findOne({ where : { id : decodedToken.id } });
-        if (!userExists) throw ({ status : error.NOT_FOUND_STATUS, message : error.USER_DOES_NOT_EXISTS });
+        const user = await User?.findOne({ where : { uuid : userId } });
+        if (!user) throw ({ status : error.NOT_FOUND_STATUS, message : error.USER_DOES_NOT_EXISTS });
 
         // @verify token
-        // if (token !== user?.dataValues?.otp) throw ({ status : 400, message : error.INVALID_CREDENTIALS });
+        if (token !== user?.dataValues?.otp) throw ({ status : 400, message : error.INVALID_CREDENTIALS });
 
         // @check if token is expired
-        // const isExpired = moment().isAfter(user?.dataValues?.expiredOtp);
-        // if (isExpired) throw ({ status : 400, message : error.INVALID_CREDENTIALS });
+        const isExpired = moment().isAfter(user?.dataValues?.expiredOtp);
+        if (isExpired) throw ({ status : 400, message : error.INVALID_CREDENTIALS });
 
         // @check context to do query action
-        // if (context === "reg") {
+        if (context === "reg") {
+            // @update user status
+            await User?.update({ isVerified : 1, otp : null, expiredOtp : null }, { where : { uuid : userId } });
+        }
         
-        // @update user status
-        await User?.update({ isVerified : 1, verifyToken : null, expiredToken : null }, { where : { id : decodedToken.id } });
-
-
         // @return response
-        res.status(200).json({ message : "Account verified successfully" })
+        res.status(200).json({ message : "Account verified successfully", data : uuid })
 
         // await transaction.commit();
     } catch (error) {
@@ -187,6 +199,46 @@ export const verify = async (req, res, next) => {
     }
 }
 
+// @request otp token
+export const requestOtp = async (req, res, next) => {
+    try {
+        // @get user email, context from body (reg or reset)
+        const { email, context } = req.body;
+
+        // @check if user exists
+        const user = await User?.findOne({ where : { email } });
+        if (!user) throw ({ status : 400, message : error.USER_DOES_NOT_EXISTS });
+
+        // @generate otp token
+        const otpToken = helpers.generateOtp();
+
+        // @update user otp token
+        await User?.update({ otp : otpToken, expiredOtp : moment().add(1, "days").format("YYYY-MM-DD HH:mm:ss") }, { where : { email } });
+
+        // @generate email message
+        const template = fs.readFileSync(path.join(process.cwd(), "templates", "otp.html"), "utf8");
+        const message  = handlebars.compile(template)({ otpToken, link : config.REDIRECT_URL + `/auth/verify/${context}-${user?.dataValues?.uuid}` })
+
+        //@send verification email
+        const mailOptions = {
+            from: config.GMAIL,
+            to: email,
+            subject: "Verification",
+            html: message
+        }
+        helpers.transporter.sendMail(mailOptions, (error, info) => {
+            if (error) throw error;
+            console.log("Email sent: " + info.response);
+        })
+
+        // @return response
+        res.status(200).json({ message : "Otp token requested successfully" })
+    } catch (error) {
+        next(error)
+    }
+}
+
+// @forgot password
 export const forgotPassword = async (req, res, next) => {
     try {
         const { email } = req.body;     
@@ -199,20 +251,18 @@ export const forgotPassword = async (req, res, next) => {
             message : error.USER_DOES_NOT_EXISTS 
         })
 
-        const accessToken = helpers.createToken({ id: isUserExist?.dataValues?.id, username : isUserExist?.dataValues?.username });
+        const otpToken = helpers.generateOtp();
+        await User?.update({otp : otpToken, expiredOtp : moment().add(1,"days").format("YYYY-MM-DD HH:mm:ss")},{where : {email : email}})
 
-        await User?.update({ verify_token : accessToken, expired_token : moment().add(1, "days").format("YYYY-MM-DD HH:mm:ss")}, 
-            { where : { id : isUserExist?.dataValues?.id }})
+        const template = fs.readFileSync(path.join(process.cwd(), "templates", "otp.html"), "utf8");
 
-        // const template = fs.readFileSync(path.join(process.cwd(), "templates", "email.html"), "utf8");
-
-        // const message  = handlebars.compile(template)({ link : `http://localhost:3000/reset_password/${accessToken}` })
+        const message = handlebars.compile(template)({otpToken, link : config.REDIRECT_URL+`/auth/reset/fp-${isUserExist?.dataValues?.uuid}`})
 
         const mailOptions = {
             from: config.GMAIL,
             to: email,
-            subject: "Reset Password",
-            html: `<h1> Click <a href="http://localhost:5000/api/auth/reset_password/${accessToken}">here</a> to reset your password</h1>`
+            subject: "Forgot Password",
+            html: message
         }
 
         helpers.transporter.sendMail(mailOptions, (error, info) => {
@@ -226,7 +276,7 @@ export const forgotPassword = async (req, res, next) => {
     } catch (error) {
         if (error instanceof ValidationError) {
             return next({ 
-                status : errorMiddleware.BAD_REQUEST_STATUS , 
+                status : error.BAD_REQUEST_STATUS , 
                 message : error?.errors?.[0] 
             })
         }
@@ -234,43 +284,51 @@ export const forgotPassword = async (req, res, next) => {
     }
 }
 
-
+// @reset password
 export const resetPassword = async (req, res, next) => {
-    const transaction = await db.sequelize.transaction();
+    // const transaction = await db.sequelize.transaction();
     try {
-        const { password } = req.body;
-        await validation.resetPasswordSchema.validate(req.body);
+        const { uuid, token, newPassword } = req.body;
+        // await validation.resetPasswordSchema.validate(req.body);
 
-        const userExists = await User?.findOne({ where: {id : req.user.id},
-                attributes : { exclude : ["verify_token","expired_token"] } });
+        const context = uuid.split("-")[0];
+        const userId = uuid.split("-")?.slice(1)?.join("-");
 
-        if (!userExists) throw ({ 
+        const user = await User?.findOne({where : {uuid : userId} });
+        if (!user) throw ({ 
             status : error.BAD_REQUEST_STATUS, 
             message : error.USER_DOES_NOT_EXISTS 
         })
+        if(token !== user?.dataValues?.otp) throw ({status : 400, message : error.INVALID_CREDENTIALS});
 
-        const hashedPassword = helpers.hashPassword(password);
+        const isExpired = moment().isAfter(user?.dataValues?.expiredOtp);
+        if(isExpired) throw ({status : 400, message : error.INVALID_CREDENTIALS});
 
+
+        const hashedPassword = helpers.hashPassword(newPassword);
+        if(context === "fp"){
         await User?.update(
             { 
                 password: hashedPassword,
-                verify_token : null,
-                expired_token : null 
+                otp : null,
+                expiredOtp : null 
             }, 
-            { where: { id: req.user.id } }
-        );
+            { where: { uuid : userId } }
+        )};
 
-        const users = await User?.findAll({ where : { id : req.user.id },
-                attributes : { exclude : ["password"] }});
+        // @delete password from response
+        delete user?.dataValues?.password;
+        delete user?.dataValues?.otp;
+        delete user?.dataValues?.expiredOtp;
 
         res.status(200).json({ 
             message : "Reset password success",
-            users
+            user
         })
 
-        await transaction.commit();
+        // await transaction.commit();
     } catch (error) {
-        await transaction.rollback();
+        // await transaction.rollback();
 
         if (error instanceof ValidationError) {
             return next({ 
@@ -278,114 +336,39 @@ export const resetPassword = async (req, res, next) => {
                 message : error?.errors?.[0] 
             })
         }
-
         next(error)
     }
 }
 
 export const changeUsername = async (req, res, next) => {
-    const transaction = await db.sequelize.transaction();
-    try {
-        const { username } = req.body;
+    try{
+        const {currentUsername, newUsername} = req.body;
         await validation.changeUsernameSchema.validate(req.body);
-
-        const usernameExists = await User?.findOne({ where: { username }});
-
-        if (usernameExists) throw ({ 
-            status : error.BAD_REQUEST_STATUS, 
-            message : error.USER_ALREADY_EXISTS
-        });
-
-        const user = await User?.findOne({ where : { id : req.user.id },
-                attributes : { exclude : ["password"] }});
-
-        const accessToken = helpers.createToken({ 
-            id: user?.dataValues?.id, 
-            username : user?.dataValues?.username 
-        });
-
-        await User?.update(
-            { 
-                username,
-                isVerified : 0,
-                verify_token : accessToken,
-                expired_token : moment().add(1,"days").format("YYYY-MM-DD HH:mm:ss")
-            }, 
-            { where: { id: req.user.id } }
-        );      
-        
-        // const template = fs.readFileSync(path.join(process.cwd(), "templates", "email.html"), "utf8");
-
-        // const message  = handlebars.compile(template)({ link : `http://localhost:3000/verification/${accessToken}` })
-
-        const mailOptions = {
-            from: config.GMAIL,
-            to: user?.dataValues?.email,
-            subject: "Verification Change Username ",
-            html: `<h1> Click <a href="http://localhost:5000/api/auth/users/change_username/${accessToken}">here</a> to reset your password</h1>`
-        }
-
-        helpers.transporter.sendMail(mailOptions, (error, info) => {
-            if (error) throw error;
-            console.log("Email sent: " + info.response);
-        })
-
-        res.status(200).json({ 
-            message : "Change username success",
-        })
-
-        await transaction.commit();
-    } catch (error) {
-        await transaction.rollback();
-
-        if (error instanceof ValidationError) {
-            return next({
-                status : error.BAD_REQUEST_STATUS, 
-                message : error?.errors?.[0]
-            })
-        }
-
+        await User.update({username : newUsername},{where : {username : currentUsername}})
+        res.status(200).json({message : "Change username success"})
+    }catch(error){
         next(error)
     }
 }
 
 export const changePassword = async (req, res, next) => {
-    const transaction = await db.sequelize.transaction();
+    // const transaction = await db.sequelize.transaction();
     try {
         const { currentPassword, newPassword } = req.body;
 
         await validation.changePasswordSchema.validate(req.body);
 
-        const userExists = await User?.findOne({ where: {id : req.user.id},
-            attributes : { exclude : ["verify_token","expired_token"] } });
-
-        const isPasswordCorrect = helpers.comparePassword(currentPassword, userExists?.dataValues?.password);
-
-        if (!isPasswordCorrect) throw ({ 
-            status : error.BAD_REQUEST_STATUS,
-            message : error.INCORRECT_PASSWORD 
-        });  
-        
-        const hashedPassword = helpers.hashPassword(newPassword);
-
-        await User?.update({ password: hashedPassword }, 
-            { where: { id: req.user.id } }
-        );
-
-        const users = await User?.findAll(
-            { where : { id : req.user.id },
-                attributes : { exclude : ["password"]}
-            }
-        );
+        const hashedOldPassword = helpers.hashPassword(currentPassword);
+        const hashedNewPassword = helpers.hashPassword(newPassword);
+        await User.update({password : hashedNewPassword},{where : {password : hashedOldPassword}})
 
         res.status(200).json({ 
-            message : "Changed password success",
-            users
+            message : "Changed password success"
         })
 
-        await transaction.commit();
+        // await transaction.commit();
     } catch (error) {
-        await transaction.rollback();
+        // await transaction.rollback();
 
         if (error instanceof ValidationError) {
             return next({ 
@@ -401,63 +384,15 @@ export const changePassword = async (req, res, next) => {
 export const changeEmail = async (req, res, next) => {
     const transaction = await db.sequelize.transaction();
     try {
-        const { email } = req.body;
-        await validation.EmailValidationSchema.validate(req.body);
-        
-        const emailExists = await User?.findOne({ where: { email }});
-
-        if (emailExists) throw ({ 
-            status : error.BAD_REQUEST_STATUS, 
-            message : error.EMAIL_ALREADY_EXISTS 
-        });
-
-        const user = await User?.findOne(
-            { where : { id : req.user.id },
-                attributes : { exclude : ["password"] }
-            }
-        );
-
-        const accessToken = helpers.createToken({ 
-            id: user?.dataValues?.id, 
-            username : user?.dataValues?.username 
-        });
-
-        await User?.update(
-            { 
-                email,
-                isVerified : 0,
-                verify_token : accessToken,
-                expired_token : moment().add(1,"days").format("YYYY-MM-DD HH:mm:ss")
-            }, 
-            { 
-                where: { id : req.user.id }
-            }
-        );
-        
-        // const template = fs.readFileSync(path.join(process.cwd(), "templates", "email.html"), "utf8");
-
-        // const message  = handlebars.compile(template)({ link : `http://localhost:3000/verification/${accessToken}` })
-
-        const mailOptions = {
-            from: config.GMAIL,
-            to: email,
-            subject: "Verification Change Email",
-            html: `<h1> Click <a href="http://localhost:5000/api/auth/users/change_email/${accessToken}">here</a> to change your email</h1>`
-        }
-
-        helpers.transporter.sendMail(mailOptions, (error, info) => {
-            if (error) throw error;
-            console.log("Email sent: " + info.response);
-        })
+        const {currentEmail, newEmail} = req.body;
+        await validation.changeEmailSchema.validate(req.body);
+        await User.update({email : newEmail},{where : {email : currentEmail}})
 
         res.status(200).json({ 
-            message : "Changed email success. Please check your email to verify", 
+            message : "Changed email success.", 
         })
-
-        await transaction.commit();
     } catch (error) {
-        await transaction.rollback();
-
+       
         if (error instanceof ValidationError) {
             return next({
                 status : error.BAD_REQUEST_STATUS, 
@@ -471,42 +406,14 @@ export const changeEmail = async (req, res, next) => {
 export const changePhone = async (req, res, next) => {
     const transaction = await db.sequelize.transaction();
     try {
-        const { phone } = req.body;        
+        const {currentPhone, newPhone} = req.body;
         await validation.changePhoneSchema.validate(req.body);
-
-        const phoneExist = await User?.findOne({ where : { phone } });
-
-        if (phoneExist) throw ({ 
-            status : error.BAD_REQUEST_STATUS, 
-            message : error.PHONE_ALREADY_EXISTS 
-        })
-
-        const userExist = await User?.findOne(
-            { where : { id : req.user.id },
-                attributes : { exclude : ["password"] }
-            }
-        );
-
-        if (!userExist) throw ({
-            status : error.NOT_FOUND_STATUS,
-            message : error.USER_DOES_NOT_EXISTS
-        })
-
-        await User?.update({ phone }, { where : { id : req.user.id } })
-        const user = await User?.findOne(
-            { where : { id : req.user.id },
-                attributes : { exclude : ['password'] }}
-        );
+        await User.update({phone : newPhone},{where : {phone : currentPhone}})
 
         res.status(200).json({ 
-            message : "Change phone number success",
-            user
+            message : "Change phone number success"
         })
-
-        await transaction.commit();
     } catch (error) {
-        await transaction.rollback();
-
         if (error instanceof ValidationError) {
             return next({
                 status : error.BAD_REQUEST_STATUS, 
@@ -519,65 +426,25 @@ export const changePhone = async (req, res, next) => {
 }
 
 export const changeProfile = async (req, res, next) => {
-    const transaction = await db.sequelize.transaction();
+    
     try {
-        if (!req.file) {
-            return next ({ 
-                status: error.BAD_REQUEST_STATUS,
-                message: "Please upload an image." 
-            })
+        const uuid = req.body.id;
+
+        if(!req.file){
+            throw new({status : 400, message : "Please upload an image."})
         }
-
-        const user = await User?.findOne(
-            { where : {id : req.user.id},
-                attributes : ['imgProfile']
-            }
-        );
-        
-        if(user?.dataValues?.imgProfile){
-            cloudinary.v2.api
-                .delete_resources([`${user?.dataValues?.imgProfile}`], 
-                    { type: 'upload', resource_type: 'image' })
-                .then(console.log);
-        }
-
-        await User?.update(
-            { imgProfile : req?.file?.filename }, 
-            { where : { id : req.user.id }}
-        )
-
+        const imageURL = "public/images/profiles/"+req?.file?.filename
+        await User?.update({imgProfile : imageURL},{where : {userId : uuid}})
         res.status(200).json(
             { 
                 message : "Image uploaded successfully", 
                 imageUrl : req.file?.filename 
             }
         )
-
-        await transaction.commit();
     } catch (error) {
-        await transaction.rollback();
         next(error)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // @delete account
 export const deleteAccount = async (req, res, next) => {
@@ -597,20 +464,12 @@ export const deleteAccount = async (req, res, next) => {
 
 export const getProfilePicture = async (req, res, next) => {
     try {
-        const user = await User?.findOne( { where : { id : req.user.id } } );
-
-        if (!user) throw ({ 
-            status : error.BAD_REQUEST_STATUS, 
-            message : error.USER_DOES_NOT_EXISTS 
-        })
-
-        if (!user.imgProfile) throw ({ 
-            status : error.NOT_FOUND_STATUS, 
-            message : "Profile picture is empty"
-        })
-
-        res.status(200).json(config.URL_PIC + user.imgProfile) 
-    } catch (error) {
-        next(error)
-    }
-}
+    //@get post id from body
+    const { folder, file } = req.params;
+    const image = path.join(process.cwd(), "public", "images", folder, file);
+    //@send response
+    res.status(200).sendFile(image);
+  } catch (error) {
+    next(error);
+  }
+};
