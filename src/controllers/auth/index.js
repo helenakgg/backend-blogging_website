@@ -420,14 +420,12 @@ export const changePhone = async (req, res, next) => {
                 message : error?.errors?.[0]
             })
         }
-
         next(error)
     }
 }
 
 export const changeProfile = async (req, res, next) => {
-    
-    try {
+        try {
         const uuid = req.body.id;
 
         if(!req.file){
@@ -464,7 +462,6 @@ export const deleteAccount = async (req, res, next) => {
 
 export const getProfilePicture = async (req, res, next) => {
     try {
-    //@get post id from body
     const { folder, file } = req.params;
     const image = path.join(process.cwd(), "public", "images", folder, file);
     //@send response

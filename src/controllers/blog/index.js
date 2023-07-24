@@ -242,7 +242,6 @@ export const deleteArticle = async (req, res, next) => {
 //@view user profile image
 export const viewImage = async (req, res, next) => {
   try {
-    //@get article id from body
     const { folder, file } = req.params;
     const image = path.join(process.cwd(), "public", "images", folder, file);
     //@send response
