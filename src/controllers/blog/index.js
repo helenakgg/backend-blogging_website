@@ -1,7 +1,3 @@
-// import { User } from "../../models/user.js";
-// import { Article } from "../../models/article.js";
-// import { Category } from "../../models/category.js"
-// import { Like } from "../../models/like.js"
 import { ValidationError } from "yup";
 import { User, Category, Article, Like } from "../../models/relation.js"
 import * as error from "../../middlewares/index.js";
@@ -9,7 +5,7 @@ import db from "../../database/index.js";
 import fs from "fs";
 import path from "path";
 
-//@get all Categories controller
+//@get all categories controller
 export const getCategory = async (req, res, next) => {
   try {
     const categories = await Category.findAll();
@@ -243,7 +239,7 @@ export const deleteArticle = async (req, res, next) => {
   }
 };
 
-//@viem user profile image
+//@view user profile image
 export const viewImage = async (req, res, next) => {
   try {
     //@get article id from body

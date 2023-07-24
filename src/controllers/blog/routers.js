@@ -13,12 +13,7 @@ import * as BlogController from "./index.js";
 //@define route
 const router = Router();
 router.get("/", BlogController.getArticleByCategory);
-router.post(
-  "/create-article",
-  verifyUser,
-  uploader.single("file"),
-  BlogController.createArticle
-);
+router.post("/create-article", verifyUser, uploader.single("file"), BlogController.createArticle);
 router.get("/all-category", BlogController.getCategory);
 router.get("/most-fav", BlogController.getMostFavoriteArticles);
 router.get("/liked-by-id", verifyUser, BlogController.getLikeArticleById);
